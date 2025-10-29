@@ -1,14 +1,13 @@
-// npm install express jsonwebtoken dotenv csv-parser chokidar
+// npm install express jsonwebtoken dotenv node-fetch
 // Create a .env file in the root directory and add:
 // JWT_SECRET=your_jwt_secret_here
 // PORT=3000
+// CLOUD_API_URL=https://api.example.com/mgnrega-data
 
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const dotenv = require("dotenv");
-const csv = require("csv-parser");
-const fs = require("fs");
-const chokidar = require("chokidar");
+const fetch = require("node-fetch");
 const path = require("path");
 
 // Load environment variables
@@ -25,7 +24,8 @@ app.use(express.static(path.join(__dirname)));
 
 // CONFIG object
 const CONFIG = {
-  CSV_FILE_PATH: "data.csv",
+  CLOUD_API_URL:
+    process.env.CLOUD_API_URL || "https://api.example.com/mgnrega-data",
   MAPPINGS: {
     districtId: "district_code",
     districtName: "district_name",
@@ -265,18 +265,24 @@ function calculateCompleteness(row) {
 // In-memory data store
 let csvData = {};
 
-// Function to load CSV into memory
-function loadCsvData() {
-  logDataQuality("Starting CSV data loading process...");
-  const dataMap = {};
-  let rowCount = 0;
-  let validRowCount = 0;
-  let invalidRowCount = 0;
-  let skippedDistricts = 0;
+// Function to load data from cloud API
+async function loadDataFromCloud() {
+  logDataQuality("Starting cloud data loading process...");
+  try {
+    const response = await fetch(CONFIG.CLOUD_API_URL);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json();
 
-  fs.createReadStream(CONFIG.CSV_FILE_PATH)
-    .pipe(csv())
-    .on("data", (row) => {
+    const dataMap = {};
+    let rowCount = 0;
+    let validRowCount = 0;
+    let invalidRowCount = 0;
+    let skippedDistricts = 0;
+
+    // Assuming data is an array of rows
+    data.forEach((row) => {
       rowCount++;
       const districtId = row[CONFIG.MAPPINGS.districtId];
 
@@ -304,77 +310,70 @@ function loadCsvData() {
         dataMap[districtId] = [];
       }
       dataMap[districtId].push(row);
-    })
-    .on("end", () => {
-      logDataQuality(
-        `CSV parsing completed. Total rows: ${rowCount}, Valid: ${validRowCount}, Invalid: ${invalidRowCount}`
-      );
-      logDataQuality(
-        `Total districts found: ${
-          Object.keys(dataMap).length
-        }, Skipped districts: ${skippedDistricts}`
-      );
-
-      // Update metrics
-      dataQualityMetrics.totalRows = rowCount;
-      dataQualityMetrics.validRows = validRowCount;
-      dataQualityMetrics.invalidRows = invalidRowCount;
-      dataQualityMetrics.skippedDistricts = skippedDistricts;
-      dataQualityMetrics.completenessScore = (validRowCount / rowCount) * 100;
-
-      // Sort by month descending and take latest or aggregate
-      for (const districtId in dataMap) {
-        dataMap[districtId].sort((a, b) => b.month.localeCompare(a.month));
-        // For simplicity, take the latest entry
-        const latest = dataMap[districtId][0];
-        logDataQuality(
-          `District ${districtId}: Latest entry month=${
-            latest.month || "N/A"
-          }, peopleEmployed=${
-            latest[CONFIG.MAPPINGS.peopleEmployed] || "N/A"
-          }, paymentSpeed=${latest[CONFIG.MAPPINGS.paymentSpeedValue] || "N/A"}`
-        );
-
-        // For historical, take last 6 if available, else repeat latest with safe parsing
-        const historical = dataMap[districtId]
-          .slice(0, 6)
-          .map((r) => parseNumericSafe(r[CONFIG.MAPPINGS.peopleEmployed], 0));
-        while (historical.length < 6) historical.push(historical[0] || 0);
-
-        csvData[districtId] = {
-          raw: latest,
-          historicalEmployed: historical,
-        };
-      }
-
-      logDataQuality("CSV data loaded into memory successfully");
-      logDataQuality(
-        `Data completeness: ${dataQualityMetrics.completenessScore.toFixed(2)}%`
-      );
-
-      // Alert if completeness is low
-      if (dataQualityMetrics.completenessScore < 80) {
-        logDataQuality(
-          `ALERT: Data completeness is low (${dataQualityMetrics.completenessScore.toFixed(
-            2
-          )}%). Check data source.`,
-          "error"
-        );
-      }
-    })
-    .on("error", (error) => {
-      logDataQuality(`Error loading CSV: ${error.message}`, "error");
     });
+
+    logDataQuality(
+      `Cloud data parsing completed. Total rows: ${rowCount}, Valid: ${validRowCount}, Invalid: ${invalidRowCount}`
+    );
+    logDataQuality(
+      `Total districts found: ${
+        Object.keys(dataMap).length
+      }, Skipped districts: ${skippedDistricts}`
+    );
+
+    // Update metrics
+    dataQualityMetrics.totalRows = rowCount;
+    dataQualityMetrics.validRows = validRowCount;
+    dataQualityMetrics.invalidRows = invalidRowCount;
+    dataQualityMetrics.skippedDistricts = skippedDistricts;
+    dataQualityMetrics.completenessScore = (validRowCount / rowCount) * 100;
+
+    // Sort by month descending and take latest or aggregate
+    for (const districtId in dataMap) {
+      dataMap[districtId].sort((a, b) => b.month.localeCompare(a.month));
+      // For simplicity, take the latest entry
+      const latest = dataMap[districtId][0];
+      logDataQuality(
+        `District ${districtId}: Latest entry month=${
+          latest.month || "N/A"
+        }, peopleEmployed=${
+          latest[CONFIG.MAPPINGS.peopleEmployed] || "N/A"
+        }, paymentSpeed=${latest[CONFIG.MAPPINGS.paymentSpeedValue] || "N/A"}`
+      );
+
+      // For historical, take last 6 if available, else repeat latest with safe parsing
+      const historical = dataMap[districtId]
+        .slice(0, 6)
+        .map((r) => parseNumericSafe(r[CONFIG.MAPPINGS.peopleEmployed], 0));
+      while (historical.length < 6) historical.push(historical[0] || 0);
+
+      csvData[districtId] = {
+        raw: latest,
+        historicalEmployed: historical,
+      };
+    }
+
+    logDataQuality("Cloud data loaded into memory successfully");
+    logDataQuality(
+      `Data completeness: ${dataQualityMetrics.completenessScore.toFixed(2)}%`
+    );
+
+    // Alert if completeness is low
+    if (dataQualityMetrics.completenessScore < 80) {
+      logDataQuality(
+        `ALERT: Data completeness is low (${dataQualityMetrics.completenessScore.toFixed(
+          2
+        )}%). Check data source.`,
+        "error"
+      );
+    }
+  } catch (error) {
+    logDataQuality(`Error loading cloud data: ${error.message}`, "error");
+  }
 }
 
-// Load CSV on start
-loadCsvData();
-
-// Watch for CSV file changes
-chokidar.watch(CONFIG.CSV_FILE_PATH).on("change", () => {
-  console.log("CSV file changed, reloading...");
-  loadCsvData();
-});
+// Load data from cloud on start
+loadDataFromCloud();
 
 // JWT Verification Middleware
 const verifyToken = (req, res, next) => {
@@ -581,140 +580,145 @@ app.get("/api/data/:districtId", verifyToken, (req, res) => {
 // Route to handle favicon.ico requests
 app.get("/favicon.ico", (req, res) => {
   res.status(204).end(); // No Content response to prevent 404
-  // ML API endpoints
-  app.get("/api/ml/predict-employment/:districtId", verifyToken, (req, res) => {
-    try {
-      const { districtId } = req.params;
-      const districtData = csvData[districtId];
-      if (!districtData)
-        return res.status(404).json({ error: "District not found." });
+});
 
-      const prediction = predictEmploymentMissing(
-        districtData.historicalEmployed
-      );
-      res.json({
-        districtId,
-        predictedEmployment: prediction,
-        method: "linear_regression",
-        confidence: prediction ? "medium" : "low",
-      });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to predict employment." });
-    }
-  });
+// Secure data-refresh endpoint
+app.post("/api/data-refresh", verifyToken, async (req, res) => {
+  try {
+    await loadDataFromCloud();
+    res.json({
+      message: "Data refreshed successfully",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logDataQuality(`Error refreshing data: ${error.message}`, "error");
+    res.status(500).json({ error: "Failed to refresh data." });
+  }
+});
 
-  app.get("/api/ml/classify-payment/:districtId", verifyToken, (req, res) => {
-    try {
-      const { districtId } = req.params;
-      const districtData = csvData[districtId];
-      if (!districtData)
-        return res.status(404).json({ error: "District not found." });
+// ML API endpoints
+app.get("/api/ml/predict-employment/:districtId", verifyToken, (req, res) => {
+  try {
+    const { districtId } = req.params;
+    const districtData = csvData[districtId];
+    if (!districtData)
+      return res.status(404).json({ error: "District not found." });
 
-      const raw = districtData.raw;
-      const employment = parseNumericSafe(
-        raw[CONFIG.MAPPINGS.peopleEmployed],
-        0
-      );
-      const classification = classifyPaymentSpeed(
-        employment,
-        districtData.historicalEmployed
-      );
+    const prediction = predictEmploymentMissing(
+      districtData.historicalEmployed
+    );
+    res.json({
+      districtId,
+      predictedEmployment: prediction,
+      method: "linear_regression",
+      confidence: prediction ? "medium" : "low",
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to predict employment." });
+  }
+});
 
-      res.json({
-        districtId,
-        predictedPaymentSpeed: classification,
-        method: "rule_based_classification",
-        confidence: classification ? "medium" : "low",
-      });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to classify payment speed." });
-    }
-  });
+app.get("/api/ml/classify-payment/:districtId", verifyToken, (req, res) => {
+  try {
+    const { districtId } = req.params;
+    const districtData = csvData[districtId];
+    if (!districtData)
+      return res.status(404).json({ error: "District not found." });
 
-  app.get(
-    "/api/ml/forecast-employment/:districtId",
-    verifyToken,
-    (req, res) => {
-      try {
-        const { districtId } = req.params;
-        const districtData = csvData[districtId];
-        if (!districtData)
-          return res.status(404).json({ error: "District not found." });
+    const raw = districtData.raw;
+    const employment = parseNumericSafe(raw[CONFIG.MAPPINGS.peopleEmployed], 0);
+    const classification = classifyPaymentSpeed(
+      employment,
+      districtData.historicalEmployed
+    );
 
-        const forecast = forecastTimeSeries(districtData.historicalEmployed);
-        res.json({
-          districtId,
-          forecastedEmployment: forecast,
-          method: "exponential_smoothing",
-          confidence: "medium",
-        });
-      } catch (error) {
-        res.status(500).json({ error: "Failed to forecast employment." });
-      }
-    }
-  );
+    res.json({
+      districtId,
+      predictedPaymentSpeed: classification,
+      method: "rule_based_classification",
+      confidence: classification ? "medium" : "low",
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to classify payment speed." });
+  }
+});
 
-  app.get("/api/ml/detect-anomaly/:districtId", verifyToken, (req, res) => {
-    try {
-      const { districtId } = req.params;
-      const districtData = csvData[districtId];
-      if (!districtData)
-        return res.status(404).json({ error: "District not found." });
+app.get("/api/ml/forecast-employment/:districtId", verifyToken, (req, res) => {
+  try {
+    const { districtId } = req.params;
+    const districtData = csvData[districtId];
+    if (!districtData)
+      return res.status(404).json({ error: "District not found." });
 
-      const raw = districtData.raw;
-      const employment = parseNumericSafe(
-        raw[CONFIG.MAPPINGS.peopleEmployed],
-        0
-      );
-      const isAnomaly = detectAnomaly(
-        employment,
-        districtData.historicalEmployed
-      );
+    const forecast = forecastTimeSeries(districtData.historicalEmployed);
+    res.json({
+      districtId,
+      forecastedEmployment: forecast,
+      method: "exponential_smoothing",
+      confidence: "medium",
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to forecast employment." });
+  }
+});
 
-      res.json({
-        districtId,
-        isAnomaly,
-        method: "z_score_detection",
-        threshold: "2_std_deviations",
-      });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to detect anomaly." });
-    }
-  });
+app.get("/api/ml/detect-anomaly/:districtId", verifyToken, (req, res) => {
+  try {
+    const { districtId } = req.params;
+    const districtData = csvData[districtId];
+    if (!districtData)
+      return res.status(404).json({ error: "District not found." });
 
-  app.get("/api/ml/cluster-districts", verifyToken, (req, res) => {
-    try {
-      const districtsData = Object.keys(csvData).map((districtId) => {
-        const raw = csvData[districtId].raw;
-        return {
-          id: districtId,
-          employment: parseNumericSafe(raw[CONFIG.MAPPINGS.peopleEmployed], 0),
-          paymentSpeed: parseNumericSafe(
-            raw[CONFIG.MAPPINGS.paymentSpeedValue],
-            0
-          ),
-        };
-      });
+    const raw = districtData.raw;
+    const employment = parseNumericSafe(raw[CONFIG.MAPPINGS.peopleEmployed], 0);
+    const isAnomaly = detectAnomaly(
+      employment,
+      districtData.historicalEmployed
+    );
 
-      const clusters = clusterDistricts(districtsData);
-      res.json({
-        clusters,
-        method: "k_means_clustering",
-        k: 3,
-        clusterLabels: {
-          0: "High Performing",
-          1: "Medium Performing",
-          2: "Low Performing",
-        },
-      });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to cluster districts." });
-    }
-  });
+    res.json({
+      districtId,
+      isAnomaly,
+      method: "z_score_detection",
+      threshold: "2_std_deviations",
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to detect anomaly." });
+  }
+});
 
-  app.get("/api/ml/config", verifyToken, (req, res) => {
-    res.json(CONFIG.ML_FEATURES);
-  });
+app.get("/api/ml/cluster-districts", verifyToken, (req, res) => {
+  try {
+    const districtsData = Object.keys(csvData).map((districtId) => {
+      const raw = csvData[districtId].raw;
+      return {
+        id: districtId,
+        employment: parseNumericSafe(raw[CONFIG.MAPPINGS.peopleEmployed], 0),
+        paymentSpeed: parseNumericSafe(
+          raw[CONFIG.MAPPINGS.paymentSpeedValue],
+          0
+        ),
+      };
+    });
+
+    const clusters = clusterDistricts(districtsData);
+    res.json({
+      clusters,
+      method: "k_means_clustering",
+      k: 3,
+      clusterLabels: {
+        0: "High Performing",
+        1: "Medium Performing",
+        2: "Low Performing",
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to cluster districts." });
+  }
+});
+
+app.get("/api/ml/config", verifyToken, (req, res) => {
+  res.json(CONFIG.ML_FEATURES);
 });
 
 // Error handling middleware

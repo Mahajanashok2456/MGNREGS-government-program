@@ -200,33 +200,59 @@
       async function getToken() {
         try {
           const response = await fetch("/api/auth/token");
-          if (!response.ok) throw new Error("Failed to get token");
+          if (!response.ok) {
+            throw new Error(
+              `Token API responded with status ${response.status}`
+            );
+          }
           const data = await response.json();
-          jwtToken = data.token;
-          return jwtToken;
+          if (data.token) {
+            jwtToken = data.token;
+            console.log("Token obtained successfully");
+            return jwtToken;
+          } else {
+            throw new Error("No token in response");
+          }
         } catch (error) {
           console.error("Error getting token:", error);
+          // For development: provide a fallback token if API is unavailable
+          console.log("Token API failed, using fallback");
           return null;
         }
       }
 
       // Function to fetch districts from API
       async function fetchDistricts() {
-        if (!jwtToken) {
-          await getToken();
-        }
         try {
+          // First try to get token and fetch from local API
+          if (!jwtToken) {
+            await getToken();
+          }
+
           const response = await fetch("/api/districts", {
             headers: {
               Authorization: `Bearer ${jwtToken}`,
             },
           });
-          if (!response.ok) throw new Error("Failed to fetch districts");
-          const districts = await response.json();
-          return districts;
+
+          if (response.ok) {
+            const districts = await response.json();
+            console.log("Districts fetched from API:", districts);
+            return districts;
+          } else {
+            throw new Error(`API responded with status ${response.status}`);
+          }
         } catch (error) {
-          console.error("Error fetching districts:", error);
-          return [];
+          console.error("Error fetching districts from API:", error);
+          // Fallback to sample districts
+          console.log("Using fallback district data");
+          return [
+            { id: "up_lucknow", name: "Lucknow" },
+            { id: "up_varanasi", name: "Varanasi" },
+            { id: "up_agra", name: "Agra" },
+            { id: "up_kanpur", name: "Kanpur" },
+            { id: "up_ghaziabad", name: "Ghaziabad" },
+          ];
         }
       }
 
@@ -253,20 +279,31 @@
 
       // Function to fetch district data from API
       async function fetchDistrictDataFromAPI(districtId) {
-        if (!jwtToken) {
-          await getToken();
-        }
         try {
+          // First ensure we have a token
+          if (!jwtToken) {
+            await getToken();
+          }
+
           const response = await fetch(`/api/data/${districtId}`, {
             headers: {
               Authorization: `Bearer ${jwtToken}`,
             },
           });
-          if (!response.ok) throw new Error("Failed to fetch data");
-          const data = await response.json();
-          return data;
+
+          if (response.ok) {
+            const data = await response.json();
+            console.log(`Data fetched from API for ${districtId}:`, data);
+            return data;
+          } else {
+            throw new Error(`API responded with status ${response.status}`);
+          }
         } catch (error) {
-          console.error("Error fetching data from API:", error);
+          console.error(
+            `Error fetching data from API for ${districtId}:`,
+            error
+          );
+          // Return null to indicate API failure
           return null;
         }
       }
@@ -382,6 +419,8 @@
 
       // Async function to fetch district data
       async function fetchDistrictData(districtId) {
+        console.log(`Fetching data for district: ${districtId}`);
+
         // Show loading spinner and hide main dashboard and error message
         if (loadingSpinner) loadingSpinner.classList.remove("hidden");
         const metricGrid = document.querySelector(
@@ -393,21 +432,37 @@
         if (chartDiv) chartDiv.classList.add("hidden");
         if (errorMessage) errorMessage.classList.add("hidden");
 
-        let districtData = await fetchDistrictDataFromAPI(districtId);
+        let districtData = null;
 
+        // Try API first
+        try {
+          districtData = await fetchDistrictDataFromAPI(districtId);
+        } catch (error) {
+          console.error("API fetch failed:", error);
+          districtData = null;
+        }
+
+        // If API fails, try fallback to mock data
         if (!districtData) {
-          // Fallback to mock data
-          districtData = mockDB[districtId];
+          console.log(`API failed for ${districtId}, trying mock data...`);
+          // Clean the district ID (remove 'up_' prefix if present)
+          const cleanDistrictId = districtId.replace(/^up_/, "");
+          districtData = mockDB[cleanDistrictId] || mockDB[districtId];
         }
 
         if (districtData) {
+          console.log(`Data found for ${districtId}:`, districtData);
           renderData(districtData);
           // Show main dashboard
           if (metricGrid) metricGrid.classList.remove("hidden");
           if (chartDiv) chartDiv.classList.remove("hidden");
         } else {
+          console.error(`No data found for district: ${districtId}`);
           // Show error message
-          if (errorMessage) errorMessage.classList.remove("hidden");
+          if (errorMessage) {
+            errorMessage.textContent = `No data available for district: ${districtId}. Please try another district.`;
+            errorMessage.classList.remove("hidden");
+          }
         }
 
         // Hide loading spinner

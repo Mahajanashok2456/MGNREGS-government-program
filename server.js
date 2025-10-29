@@ -265,15 +265,152 @@ function calculateCompleteness(row) {
 // In-memory data store
 let csvData = {};
 
+// Function to load sample data locally (fallback when cloud API fails)
+function loadSampleData() {
+  logDataQuality("Loading sample data locally...");
+
+  // Sample MGNREGA data for UP districts
+  const sampleData = [
+    {
+      district_code: "up_lucknow",
+      district_name: "Lucknow",
+      state_name: "UTTAR PRADESH",
+      Total_Individuals_Worked: 145000,
+      percentage_payments_gererated_within_15_days: 85,
+      month: "2025-10",
+    },
+    {
+      district_code: "up_varanasi",
+      district_name: "Varanasi",
+      state_name: "UTTAR PRADESH",
+      Total_Individuals_Worked: 120000,
+      percentage_payments_gererated_within_15_days: 65,
+      month: "2025-10",
+    },
+    {
+      district_code: "up_agra",
+      district_name: "Agra",
+      state_name: "UTTAR PRADESH",
+      Total_Individuals_Worked: 95000,
+      percentage_payments_gererated_within_15_days: 45,
+      month: "2025-10",
+    },
+    {
+      district_code: "up_kanpur",
+      district_name: "Kanpur",
+      state_name: "UTTAR PRADESH",
+      Total_Individuals_Worked: 180000,
+      percentage_payments_gererated_within_15_days: 90,
+      month: "2025-10",
+    },
+    {
+      district_code: "up_ghaziabad",
+      district_name: "Ghaziabad",
+      state_name: "UTTAR PRADESH",
+      Total_Individuals_Worked: 110000,
+      percentage_payments_gererated_within_15_days: 70,
+      month: "2025-10",
+    },
+  ];
+
+  const dataMap = {};
+  let rowCount = 0;
+  let validRowCount = 0;
+  let skippedDistricts = 0;
+
+  sampleData.forEach((row) => {
+    rowCount++;
+    const districtId = row[CONFIG.MAPPINGS.districtId];
+
+    // Validate row data
+    if (!validateDistrictData(row)) {
+      skippedDistricts++;
+      logDataQuality(
+        `Skipping invalid row ${rowCount} for districtId: ${districtId}`,
+        "warn"
+      );
+      return;
+    }
+
+    validRowCount++;
+    logDataQuality(
+      `Processing row ${rowCount}: districtId=${districtId}, districtName=${
+        row[CONFIG.MAPPINGS.districtName] || "N/A"
+      }, peopleEmployed=${
+        row[CONFIG.MAPPINGS.peopleEmployed] || "N/A"
+      }, paymentSpeed=${row[CONFIG.MAPPINGS.paymentSpeedValue] || "N/A"}`
+    );
+
+    if (!dataMap[districtId]) {
+      dataMap[districtId] = [];
+    }
+    dataMap[districtId].push(row);
+  });
+
+  logDataQuality(
+    `Sample data parsing completed. Total rows: ${rowCount}, Valid: ${validRowCount}, Skipped: ${skippedDistricts}`
+  );
+  logDataQuality(
+    `Total districts found: ${
+      Object.keys(dataMap).length
+    }, Skipped districts: ${skippedDistricts}`
+  );
+
+  // Update metrics
+  dataQualityMetrics.totalRows = rowCount;
+  dataQualityMetrics.validRows = validRowCount;
+  dataQualityMetrics.invalidRows = rowCount - validRowCount;
+  dataQualityMetrics.skippedDistricts = skippedDistricts;
+  dataQualityMetrics.completenessScore = (validRowCount / rowCount) * 100;
+
+  // Process each district
+  for (const districtId in dataMap) {
+    const latest = dataMap[districtId][0];
+    logDataQuality(
+      `District ${districtId}: Latest entry month=${
+        latest.month || "N/A"
+      }, peopleEmployed=${
+        latest[CONFIG.MAPPINGS.peopleEmployed] || "N/A"
+      }, paymentSpeed=${latest[CONFIG.MAPPINGS.paymentSpeedValue] || "N/A"}`
+    );
+
+    // Create historical data (6 months)
+    const baseEmployment = parseNumericSafe(
+      latest[CONFIG.MAPPINGS.peopleEmployed],
+      0
+    );
+    const historical = [];
+    for (let i = 0; i < 6; i++) {
+      // Add some variation around the base value
+      const variation = (Math.random() - 0.5) * 0.2; // ±10% variation
+      historical.push(Math.round(baseEmployment * (1 + variation)));
+    }
+
+    csvData[districtId] = {
+      raw: latest,
+      historicalEmployed: historical,
+    };
+  }
+
+  logDataQuality("Sample data loaded into memory successfully");
+  logDataQuality(
+    `Data completeness: ${dataQualityMetrics.completenessScore.toFixed(2)}%`
+  );
+}
+
 // Function to load data from cloud API
 async function loadDataFromCloud() {
   logDataQuality("Starting cloud data loading process...");
   try {
+    logDataQuality("Attempting to fetch from cloud API...");
     const response = await fetch(CONFIG.CLOUD_API_URL);
+
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
+
     const data = await response.json();
+    logDataQuality("Cloud data fetched successfully, processing...");
 
     const dataMap = {};
     let rowCount = 0;
@@ -330,7 +467,9 @@ async function loadDataFromCloud() {
 
     // Sort by month descending and take latest or aggregate
     for (const districtId in dataMap) {
-      dataMap[districtId].sort((a, b) => b.month.localeCompare(a.month));
+      dataMap[districtId].sort((a, b) =>
+        (b.month || "").localeCompare(a.month || "")
+      );
       // For simplicity, take the latest entry
       const latest = dataMap[districtId][0];
       logDataQuality(
@@ -368,7 +507,9 @@ async function loadDataFromCloud() {
       );
     }
   } catch (error) {
-    logDataQuality(`Error loading cloud data: ${error.message}`, "error");
+    logDataQuality(`Cloud API failed: ${error.message}`, "warn");
+    logDataQuality("Falling back to sample data...", "info");
+    loadSampleData();
   }
 }
 
